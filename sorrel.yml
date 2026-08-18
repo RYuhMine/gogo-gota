@@ -1,0 +1,53 @@
+name: Sorrel OTA Checker
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'   # every 5 minutes
+  workflow_dispatch:          # allow manual runs from the Actions tab
+
+jobs:
+  check-sorrel:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # archived.txt persists across runs via GitHub Actions cache.
+      # The cache key includes the branch name so forks don't collide.
+      - name: Restore archived URLs cache
+        uses: actions/cache@v4
+        with:
+          path: archived.txt
+          key: sorrel-archived-${{ github.ref_name }}
+          restore-keys: |
+            sorrel-archived-
+
+      - name: Run sorrel checker
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          python sorrel_checker.py --sorrel
+
+      # Save updated archived.txt so the next run picks it up.
+      # actions/cache saves automatically when the job succeeds and the
+      # cache key changed — but we force a unique key so it always saves.
+      - name: Save archived URLs cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: archived.txt
+          key: sorrel-archived-${{ github.ref_name }}-${{ github.run_id }}
+
+      - name: Upload log as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sorrel-log-${{ github.run_id }}
+          path: sorrel_checker.log
+          retention-days: 30
