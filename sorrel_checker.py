@@ -349,7 +349,7 @@ def send_discord(findings):
         req     = urllib.request.Request(
             webhook_url,
             data=data,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
