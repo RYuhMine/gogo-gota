@@ -34,7 +34,7 @@ CHECKIN_URL        = "http://android.googleapis.com/checkin"
 
 DISCORD_WEBHOOK    = os.environ.get("DISCORD_WEBHOOK", "")
 
-REQUEST_DELAY_SEC  = 1.5   # delay between serial requests to avoid rate-limiting
+REQUEST_DELAY_SEC  = 0.2   # delay between serial requests to avoid rate-limiting
 
 
 # ─────────────────────────────────────────────────────────────────────────────
