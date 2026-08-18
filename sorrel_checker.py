@@ -35,6 +35,7 @@ LOG_FILE           = "sorrel_checker.log"
 CHECKIN_URL        = "http://android.googleapis.com/checkin"
 
 DISCORD_WEBHOOK    = os.environ.get("DISCORD_WEBHOOK", "")
+DISCORD_WEBHOOK_2  = os.environ.get("DISCORD_WEBHOOK_2", "")
 
 REQUEST_DELAY_SEC  = 0.2   # delay between serial requests to avoid rate-limiting
 
@@ -319,15 +320,27 @@ def format_finding(ota):
 #  Discord notifier
 # ─────────────────────────────────────────────────────────────────────────────
 
-def send_discord(findings):
-    """
-    findings: list of OTA dicts that were found new this run.
-    Sends a single message per run with all new findings.
-    """
-    if not DISCORD_WEBHOOK:
-        log("[Discord] DISCORD_WEBHOOK not set, skipping notification.")
-        return
+def _send_to_webhook(webhook_url, payload):
+    webhook_url = webhook_url.strip()
+    log(f"[Discord] Sending to: {webhook_url[:50]}...")
+    try:
+        data = json.dumps(payload).encode("utf-8")
+        req  = urllib.request.Request(
+            webhook_url,
+            data=data,
+            headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            log(f"[Discord] Notification sent (HTTP {resp.status}).")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="ignore")
+        log(f"[Discord] Failed to send notification: {e} — Response: {body}")
+    except Exception as e:
+        log(f"[Discord] Failed to send notification: {e}")
 
+
+def send_discord(findings):
     if not findings:
         return
 
@@ -343,28 +356,18 @@ def send_discord(findings):
         body = body[:1900] + "\n...(truncated)"
 
     content = f"**New Sorrel OTA ({count} update{'s' if count > 1 else ''}) — {ts}**\n```\n{body}\n```"
-
     payload = {"content": content}
 
-    webhook_url = DISCORD_WEBHOOK.strip()
-    log(f"[Discord] Webhook URL length: {len(webhook_url)}")
-    log(f"[Discord] Webhook starts with: {webhook_url[:50]}")
+    if DISCORD_WEBHOOK:
+        _send_to_webhook(DISCORD_WEBHOOK, payload)
+    else:
+        log("[Discord] DISCORD_WEBHOOK not set, skipping.")
 
-    try:
-        data    = json.dumps(payload).encode("utf-8")
-        req     = urllib.request.Request(
-            webhook_url,
-            data=data,
-            headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            log(f"[Discord] Notification sent (HTTP {resp.status}).")
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="ignore")
-        log(f"[Discord] Failed to send notification: {e} — Response: {body}")
-    except Exception as e:
-        log(f"[Discord] Failed to send notification: {e}")
+    if DISCORD_WEBHOOK_2:
+        _send_to_webhook(DISCORD_WEBHOOK_2, payload)
+    else:
+        log("[Discord] DISCORD_WEBHOOK_2 not set, skipping.")
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
