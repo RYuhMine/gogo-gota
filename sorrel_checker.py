@@ -13,6 +13,8 @@ import sys
 import os
 import re
 import gzip
+import zlib
+import ssl
 import urllib.request
 import urllib.error
 import json
@@ -306,6 +308,10 @@ def format_finding(ota):
         lines.append(f"Description: {ota['description']}")
     if ota.get("size"):
         lines.append(f"Size: {ota['size']}")
+    if ota.get("post_build"):
+        lines.append(f"Fingerprint: {ota['post_build']}")
+    if ota.get("pre_build"):
+        lines.append(f"Pre-build: {ota['pre_build']}")
     return "\n".join(lines)
 
 
@@ -362,6 +368,212 @@ def send_discord(findings):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  OTA metadata fetcher (extracts post-build fingerprint etc. from ZIP tail)
+# ─────────────────────────────────────────────────────────────────────────────
+
+PAYLOAD_METADATA_PREFIXES = [
+    'post-build',
+    'pre-build',
+    'pre-device',
+    'post-build-incremental',
+    'post-sdk-level',
+    'post-security-patch-level',
+    'post-timestamp',
+    'ota-type',
+    'ota-required-cache',
+    'pre-build-incremental',
+]
+
+EOCD_SIG  = b'PK\x05\x06'
+CDFH_SIG  = b'PK\x01\x02'
+LFH_SIG   = b'PK\x03\x04'
+
+_METADATA_UA = ('AndroidDownloadManager/14 (Linux; U; Android 14; '
+                'sdk_gphone64_x86_64 Build/UE1A.230829.036)')
+
+
+def _parse_all_metadata_lines(blob: bytes, known_prefixes) -> dict:
+    try:
+        text = blob.decode('utf-8', errors='replace')
+    except Exception:
+        return {}
+    all_lines = {}
+    order = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip('\r').strip()
+        if not line or '=' not in line:
+            continue
+        key, _, value = line.partition('=')
+        key = key.strip()
+        value = value.strip()
+        if not key or not value:
+            continue
+        if key not in all_lines:
+            order.append(key)
+        all_lines[key] = value
+    result = {}
+    for prefix in known_prefixes:
+        if prefix in all_lines:
+            result[prefix] = all_lines[prefix]
+    for key in order:
+        if key not in result:
+            result[key] = all_lines[key]
+    return result
+
+
+def _extract_metadata_kv(blob: bytes, prefixes) -> dict:
+    result = {}
+    for prefix in prefixes:
+        needle = f'{prefix}='.encode('utf-8')
+        start = blob.find(needle)
+        if start == -1:
+            continue
+        val_start = start + len(needle)
+        end = blob.find(b'\n', val_start)
+        if end == -1:
+            end = len(blob)
+        try:
+            value = blob[val_start:end].decode('utf-8', errors='replace').strip('\r')
+        except Exception:
+            continue
+        if value:
+            result[prefix] = value
+    return result
+
+
+def _find_zip_metadata_entry(tail_blob: bytes, tail_offset: int):
+    eocd_pos = tail_blob.rfind(EOCD_SIG)
+    if eocd_pos == -1:
+        return None
+    try:
+        cd_size   = struct.unpack('<I', tail_blob[eocd_pos + 12:eocd_pos + 16])[0]
+        cd_offset = struct.unpack('<I', tail_blob[eocd_pos + 16:eocd_pos + 20])[0]
+    except struct.error:
+        return None
+    cd_start = cd_offset - tail_offset
+    if cd_start < 0:
+        return None
+    pos = cd_start
+    end = cd_start + cd_size
+    while pos < end and pos < len(tail_blob) - 46:
+        if tail_blob[pos:pos + 4] != CDFH_SIG:
+            break
+        compression_method = struct.unpack('<H', tail_blob[pos + 10:pos + 12])[0]
+        compressed_size    = struct.unpack('<I', tail_blob[pos + 20:pos + 24])[0]
+        name_len           = struct.unpack('<H', tail_blob[pos + 28:pos + 30])[0]
+        extra_len          = struct.unpack('<H', tail_blob[pos + 30:pos + 32])[0]
+        comment_len        = struct.unpack('<H', tail_blob[pos + 32:pos + 34])[0]
+        local_offset       = struct.unpack('<I', tail_blob[pos + 42:pos + 46])[0]
+        name               = tail_blob[pos + 46:pos + 46 + name_len]
+        if name == b'META-INF/com/android/metadata':
+            return local_offset, compressed_size, compression_method, name.decode(errors='replace')
+        pos += 46 + name_len + extra_len + comment_len
+    return None
+
+
+def fetch_ota_metadata(url: str, timeout: int = 20) -> dict:
+    """
+    Downloads only the tail of the OTA ZIP to extract META-INF/com/android/metadata
+    without fetching the whole file. Returns a dict with 'found' and 'fields'.
+    """
+    out = {'found': False, 'fields': {}, 'error': None}
+
+    def _get_range(range_header):
+        req_h = {'User-Agent': _METADATA_UA, 'Accept-Encoding': 'identity', 'Range': range_header}
+        req = urllib.request.Request(url, headers=req_h)
+        ctx = ssl.create_default_context()
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+            return resp.read()
+
+    try:
+        head_req = urllib.request.Request(url, method='HEAD',
+                                          headers={'User-Agent': _METADATA_UA,
+                                                   'Accept-Encoding': 'identity'})
+        ctx = ssl.create_default_context()
+        with urllib.request.urlopen(head_req, timeout=timeout, context=ctx) as resp:
+            total_size = int(resp.headers.get('Content-Length', '0') or '0')
+    except Exception as e:
+        out['error'] = f"HEAD failed: {e}"
+        return out
+
+    if total_size <= 0:
+        out['error'] = "Cannot determine file size"
+        return out
+
+    # Fetch last 2 MB (enough to find EOCD + central directory + small metadata entry)
+    chunk = 2 * 1024 * 1024
+    tail_offset = max(0, total_size - chunk)
+    try:
+        tail_data = _get_range(f'bytes={tail_offset}-{total_size - 1}')
+    except Exception as e:
+        out['error'] = f"Tail fetch failed: {e}"
+        return out
+
+    # Try to find and extract the metadata entry from the ZIP central directory
+    entry = _find_zip_metadata_entry(tail_data, tail_offset)
+    if entry:
+        local_header_offset, compressed_size, compression_method, _ = entry
+        lh_start = local_header_offset - tail_offset
+        try:
+            if 0 <= lh_start and lh_start + 30 <= len(tail_data):
+                lh_blob = tail_data
+                lh_pos  = lh_start
+            else:
+                lh_blob = _get_range(f'bytes={local_header_offset}-{local_header_offset + 4096}')
+                lh_pos  = 0
+
+            if lh_blob[lh_pos:lh_pos + 4] == LFH_SIG:
+                name_len  = struct.unpack('<H', lh_blob[lh_pos + 26:lh_pos + 28])[0]
+                extra_len = struct.unpack('<H', lh_blob[lh_pos + 28:lh_pos + 30])[0]
+                data_start = lh_pos + 30 + name_len + extra_len
+
+                if data_start + compressed_size <= len(lh_blob):
+                    entry_data = lh_blob[data_start:data_start + compressed_size]
+                else:
+                    abs_start  = local_header_offset + 30 + name_len + extra_len
+                    entry_data = _get_range(f'bytes={abs_start}-{abs_start + compressed_size - 1}')
+
+                if compression_method == 0:
+                    plain = entry_data
+                elif compression_method == 8:
+                    plain = zlib.decompress(entry_data, -15)
+                else:
+                    plain = b''
+
+                if plain:
+                    fields = _parse_all_metadata_lines(plain, PAYLOAD_METADATA_PREFIXES)
+                    if fields:
+                        out['found'] = True
+                        out['fields'] = fields
+                        return out
+        except Exception as e:
+            out['error'] = f"Entry extraction failed: {e}"
+
+    # Fallback: raw scan of the tail blob
+    for prefix in PAYLOAD_METADATA_PREFIXES:
+        pos = tail_data.find(f'{prefix}='.encode('utf-8'))
+        if pos != -1:
+            block_end = tail_data.find(LFH_SIG, pos)
+            if block_end == -1:
+                block_end = tail_data.find(CDFH_SIG, pos)
+            if block_end == -1:
+                block_end = len(tail_data)
+            fields = _parse_all_metadata_lines(tail_data[max(0, pos - 4096):block_end],
+                                               PAYLOAD_METADATA_PREFIXES)
+            if fields:
+                out['found'] = True
+                out['fields'] = fields
+                return out
+
+    fields = _extract_metadata_kv(tail_data, PAYLOAD_METADATA_PREFIXES)
+    if fields:
+        out['found'] = True
+        out['fields'] = fields
+
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Main sorrel run
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -398,6 +610,26 @@ def run_sorrel():
                     finding_text = format_finding(ota)
                     for line in finding_text.splitlines():
                         log(f"  {line}")
+
+                    # Fetch metadata from the OTA ZIP
+                    try:
+                        log(f"  Fetching OTA metadata...")
+                        meta = fetch_ota_metadata(url)
+                        if meta['found'] and meta['fields']:
+                            fields = meta['fields']
+                            post_build = fields.get('post-build', '')
+                            if post_build:
+                                log(f"  Fingerprint: {post_build}")
+                                ota['post_build'] = post_build
+                            pre_build = fields.get('pre-build', '')
+                            if pre_build:
+                                log(f"  Pre-build:   {pre_build}")
+                                ota['pre_build'] = pre_build
+                        else:
+                            log(f"  Metadata: not found{(' — ' + meta['error']) if meta.get('error') else ''}")
+                    except Exception as me:
+                        log(f"  Metadata fetch error: {me}")
+
                     log("")  # blank line separator
 
                     new_findings.append(ota)
