@@ -35,15 +35,13 @@ jobs:
         run: |
           python sorrel_checker.py --sorrel
 
-      # Save updated archived.txt so the next run picks it up.
-      # actions/cache saves automatically when the job succeeds and the
-      # cache key changed — but we force a unique key so it always saves.
-      - name: Save archived URLs cache
+      - name: Upload archived URLs artifact
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/upload-artifact@v4
         with:
+          name: archived-${{ github.ref_name }}-${{ github.run_id }}
           path: archived.txt
-          key: sorrel-archived-${{ github.ref_name }}-${{ github.run_id }}
+          retention-days: 30
 
       - name: Upload log as artifact
         if: always()
