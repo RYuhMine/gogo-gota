@@ -354,6 +354,9 @@ def send_discord(findings):
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
             log(f"[Discord] Notification sent (HTTP {resp.status}).")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="ignore")
+        log(f"[Discord] Failed to send notification: {e} — Response: {body}")
     except Exception as e:
         log(f"[Discord] Failed to send notification: {e}")
 
