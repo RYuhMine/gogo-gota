@@ -31,6 +31,7 @@ jobs:
       - name: Run sorrel checker
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          DISCORD_WEBHOOK_2: ${{ secrets.DISCORD_WEBHOOK_2 }}
         run: |
           python sorrel_checker.py --sorrel
 
