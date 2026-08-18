@@ -34,7 +34,7 @@ CHECKIN_URL        = "http://android.googleapis.com/checkin"
 
 DISCORD_WEBHOOK    = os.environ.get("DISCORD_WEBHOOK", "")
 
-REQUEST_DELAY_SEC  = 0.2   # delay between serial requests to avoid rate-limiting
+REQUEST_DELAY_SEC  = 1.5   # delay between serial requests to avoid rate-limiting
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -327,36 +327,27 @@ def send_discord(findings):
 
     ts    = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     count = len(findings)
-    title = f"🆕 Sorrel OTA — {count} new update{'s' if count > 1 else ''} found"
 
     body_parts = []
     for ota in findings:
         body_parts.append(format_finding(ota))
 
-    description = "\n\n".join(body_parts)
+    body = "\n\n".join(body_parts)
+    if len(body) > 1900:
+        body = body[:1900] + "\n...(truncated)"
 
-    # Discord embed description is capped at 4096 chars
-    if len(description) > 4000:
-        description = description[:4000] + "\n...(truncated)"
+    content = f"**New Sorrel OTA ({count} update{'s' if count > 1 else ''}) — {ts}**\n```\n{body}\n```"
 
-    payload = {
-        "embeds": [
-            {
-                "title":       title,
-                "description": f"```\n{description}\n```",
-                "color":       0x00C8FF,
-                "footer":      {"text": ts},
-            }
-        ]
-    }
+    payload = {"content": content}
 
-    log(f"[Discord] Webhook URL length: {len(DISCORD_WEBHOOK)}")
-    log(f"[Discord] Webhook starts with: {DISCORD_WEBHOOK[:50]}")
+    webhook_url = DISCORD_WEBHOOK.strip()
+    log(f"[Discord] Webhook URL length: {len(webhook_url)}")
+    log(f"[Discord] Webhook starts with: {webhook_url[:50]}")
 
     try:
         data    = json.dumps(payload).encode("utf-8")
         req     = urllib.request.Request(
-            DISCORD_WEBHOOK,
+            webhook_url,
             data=data,
             headers={"Content-Type": "application/json"},
             method="POST",
