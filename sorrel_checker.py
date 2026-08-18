@@ -34,7 +34,7 @@ CHECKIN_URL        = "http://android.googleapis.com/checkin"
 
 DISCORD_WEBHOOK    = os.environ.get("DISCORD_WEBHOOK", "")
 
-REQUEST_DELAY_SEC  = 0.3   # delay between serial requests to avoid rate-limiting
+REQUEST_DELAY_SEC  = 1.5   # delay between serial requests to avoid rate-limiting
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -349,6 +349,9 @@ def send_discord(findings):
             }
         ]
     }
+
+    log(f"[Discord] Webhook URL length: {len(DISCORD_WEBHOOK)}")
+    log(f"[Discord] Webhook starts with: {DISCORD_WEBHOOK[:50]}")
 
     try:
         data    = json.dumps(payload).encode("utf-8")
