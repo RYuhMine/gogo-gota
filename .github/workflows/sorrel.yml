@@ -25,18 +25,17 @@ jobs:
         run: |
           python sorrel_checker.py --sorrel
 
-      - name: Commit archived URLs if changed
+      - name: Commit and push archived URLs
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git add archived.txt
-          git diff --quiet && git diff --staged --quiet || git commit -m "Update archived URLs"
-
-      - name: Push changes
-        uses: ad-m/github-push-action@master
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          branch: ${{ github.ref }}
+          if git diff --quiet && git diff --staged --quiet; then
+            echo "No changes to archived.txt"
+          else
+            git commit -m "Update archived URLs"
+            git push
+          fi
 
       - name: Upload log as artifact
         if: always()
