@@ -18,16 +18,6 @@ jobs:
         with:
           python-version: '3.12'
 
-      # archived.txt persists across runs via GitHub Actions cache.
-      # The cache key includes the branch name so forks don't collide.
-      - name: Restore archived URLs cache
-        uses: actions/cache@v4
-        with:
-          path: archived.txt
-          key: sorrel-archived-${{ github.ref_name }}
-          restore-keys: |
-            sorrel-archived-
-
       - name: Run sorrel checker
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
@@ -35,13 +25,18 @@ jobs:
         run: |
           python sorrel_checker.py --sorrel
 
-      - name: Upload archived URLs artifact
-        if: always()
-        uses: actions/upload-artifact@v4
+      - name: Commit archived URLs if changed
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add archived.txt
+          git diff --quiet && git diff --staged --quiet || git commit -m "Update archived URLs"
+
+      - name: Push changes
+        uses: ad-m/github-push-action@master
         with:
-          name: archived-${{ github.ref_name }}-${{ github.run_id }}
-          path: archived.txt
-          retention-days: 30
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          branch: ${{ github.ref }}
 
       - name: Upload log as artifact
         if: always()
