@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-Android XR OTA Checker
-Reads numbered files (1.txt, 2.txt, 3.txt, ...) until no file is found.
-Each file: first line = build fingerprint, remaining lines = serial numbers.
-Performs checkin requests and reports new OTA URLs to logs and Discord.
-
-Also re-checks all post-build fingerprints from archived OTAs on every run.
+Sorrel OTA Checker
+Reads serial numbers from serials.txt, performs checkin requests with
+the google/sorrel build fingerprint, and reports new OTA URLs to logs
+and Discord.
 
 Usage:
-    python sorrel_checker.py --xr
+    python sorrel_checker.py --sorrel
 """
 
 import sys
@@ -30,8 +28,9 @@ from datetime import datetime, timezone
 #  Config
 # ─────────────────────────────────────────────────────────────────────────────
 
+SORREL_FINGERPRINT = "google/sorrel/sorrel:9/1/1:user/dev-keys,test-keys,release-keys"
+SERIALS_FILE       = "serials.txt"
 ARCHIVED_FILE      = "archived.txt"
-ARCHIVED_FP_FILE   = "archived_fingerprints.txt"   # post-build fingerprints seen so far
 LOG_FILE           = "sorrel_checker.log"
 CHECKIN_URL        = "http://android.googleapis.com/checkin"
 
@@ -42,7 +41,7 @@ REQUEST_DELAY_SEC  = 0.2   # delay between serial requests to avoid rate-limitin
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Protobuf helpers
+#  Protobuf helpers (extracted from sorrel-dog.py)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def encode_varint(value):
@@ -133,28 +132,6 @@ def parse_fingerprint(fingerprint):
         "build_type":  build_type,
         "key_type":    key_type,
     }
-
-
-def pick_matching_fingerprint(all_fps, reference_fingerprint):
-    """
-    From a list of fingerprints (split from post-build by |),
-    pick the one whose device matches the reference fingerprint's device.
-    Falls back to the first entry if no match found.
-    """
-    try:
-        ref_device = parse_fingerprint(reference_fingerprint)["device"]
-    except Exception:
-        ref_device = None
-
-    if ref_device:
-        for fp in all_fps:
-            try:
-                if parse_fingerprint(fp)["device"] == ref_device:
-                    return fp
-            except Exception:
-                continue
-
-    return all_fps[0] if all_fps else reference_fingerprint
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -294,7 +271,7 @@ def perform_checkin(fingerprint, device_sn="", url=None):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Archived URL / fingerprint helpers
+#  Archived URL helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load_archived_urls(path=ARCHIVED_FILE):
@@ -307,18 +284,6 @@ def load_archived_urls(path=ARCHIVED_FILE):
 def save_archived_url(url, path=ARCHIVED_FILE):
     with open(path, "a", encoding="utf-8") as f:
         f.write(url + "\n")
-
-
-def load_archived_fingerprints(path=ARCHIVED_FP_FILE):
-    if not os.path.exists(path):
-        return set()
-    with open(path, "r", encoding="utf-8") as f:
-        return {line.strip() for line in f if line.strip()}
-
-
-def save_archived_fingerprint(fp, path=ARCHIVED_FP_FILE):
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(fp + "\n")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -390,7 +355,7 @@ def send_discord(findings):
     if len(body) > 1900:
         body = body[:1900] + "\n...(truncated)"
 
-    content = f"**New Android XR OTA ({count} update{'s' if count > 1 else ''}) — {ts}**\n```\n{body}\n```"
+    content = f"**New Sorrel OTA ({count} update{'s' if count > 1 else ''}) — {ts}**\n```\n{body}\n```"
     payload = {"content": content}
 
     if DISCORD_WEBHOOK:
@@ -402,6 +367,7 @@ def send_discord(findings):
         _send_to_webhook(DISCORD_WEBHOOK_2, payload)
     else:
         log("[Discord] DISCORD_WEBHOOK_2 not set, skipping.")
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -537,6 +503,7 @@ def fetch_ota_metadata(url: str, timeout: int = 20) -> dict:
         out['error'] = "Cannot determine file size"
         return out
 
+    # Fetch last 2 MB (enough to find EOCD + central directory + small metadata entry)
     chunk = 2 * 1024 * 1024
     tail_offset = max(0, total_size - chunk)
     try:
@@ -545,6 +512,7 @@ def fetch_ota_metadata(url: str, timeout: int = 20) -> dict:
         out['error'] = f"Tail fetch failed: {e}"
         return out
 
+    # Try to find and extract the metadata entry from the ZIP central directory
     entry = _find_zip_metadata_entry(tail_data, tail_offset)
     if entry:
         local_header_offset, compressed_size, compression_method, _ = entry
@@ -584,6 +552,7 @@ def fetch_ota_metadata(url: str, timeout: int = 20) -> dict:
         except Exception as e:
             out['error'] = f"Entry extraction failed: {e}"
 
+    # Fallback: raw scan of the tail blob
     for prefix in PAYLOAD_METADATA_PREFIXES:
         pos = tail_data.find(f'{prefix}='.encode('utf-8'))
         if pos != -1:
@@ -608,179 +577,79 @@ def fetch_ota_metadata(url: str, timeout: int = 20) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Numbered file loader: 1.txt, 2.txt, 3.txt, ...
+#  Main sorrel run
 # ─────────────────────────────────────────────────────────────────────────────
 
-def load_numbered_files():
-    """
-    Loads 1.txt, 2.txt, 3.txt, ... until a file is not found.
-    Each file: first line = fingerprint, remaining lines = serial numbers.
-    Returns a list of (fingerprint, [serials], filename) tuples.
-    """
-    result = []
-    idx = 1
-    while True:
-        filename = f"{idx}.txt"
-        if not os.path.exists(filename):
-            log(f"File {filename} not found — stopping file scan.")
-            break
-        with open(filename, "r", encoding="utf-8") as f:
-            lines = [line.strip() for line in f if line.strip()]
-        if not lines:
-            log(f"[WARN] {filename} is empty, skipping.")
-            idx += 1
-            continue
-        fingerprint = lines[0]
-        serials     = lines[1:]
-        log(f"Loaded {filename}: fingerprint={fingerprint}, {len(serials)} serial(s).")
-        result.append((fingerprint, serials, filename))
-        idx += 1
-    return result
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  Core checkin with fingerprint chain
-# ─────────────────────────────────────────────────────────────────────────────
-
-def checkin_with_fingerprint_chain(serial, initial_fingerprint, archived_urls,
-                                   archived_fps, new_findings, indent="  "):
-    """
-    Given a serial and a starting fingerprint, performs checkin.
-    If a new OTA is found:
-      - fetches its metadata
-      - extracts all fingerprints from post-build (split by |), saves them to archived_fps
-      - iterates each fingerprint with the same serial
-    Only URLs not in archived_urls are reported as new findings.
-    """
-    queue = [initial_fingerprint]
-    visited_fingerprints = set()
-
-    while queue:
-        fingerprint = queue.pop(0)
-        if fingerprint in visited_fingerprints:
-            continue
-        visited_fingerprints.add(fingerprint)
-
-        log(f"{indent}Trying fingerprint: {fingerprint}")
-
-        try:
-            settings = perform_checkin(fingerprint, device_sn=serial)
-            ota      = find_ota_link(settings)
-
-            if not (ota and ota["url"]):
-                log(f"{indent}No OTA update found.")
-                time.sleep(REQUEST_DELAY_SEC)
-                continue
-
-            url = ota["url"]
-            is_new = url not in archived_urls
-
-            if is_new:
-                log(f"{indent}*** NEW URL FOUND ***")
-            else:
-                log(f"{indent}URL already archived, skipping.")
-
-            # Always fetch metadata to collect post-build fingerprints for chaining,
-            # but only log/report if this URL is new
-            extra_fingerprints = []
-            try:
-                if is_new:
-                    log(f"{indent}Fetching OTA metadata...")
-                meta = fetch_ota_metadata(url)
-                if meta['found'] and meta['fields']:
-                    fields = meta['fields']
-
-                    post_build_raw = fields.get('post-build', '')
-                    if post_build_raw:
-                        all_fps = [fp.strip() for fp in post_build_raw.split('|') if fp.strip()]
-                        clean_fp = pick_matching_fingerprint(all_fps, fingerprint)
-                        if is_new:
-                            log(f"{indent}Fingerprint: {clean_fp}")
-                            ota['post_build'] = clean_fp
-                        extra_fingerprints = all_fps
-
-                    pre_build = fields.get('pre-build', '')
-                    if pre_build and is_new:
-                        pre_fps = [fp.strip() for fp in pre_build.split('|') if fp.strip()]
-                        clean_pre = pick_matching_fingerprint(pre_fps, fingerprint)
-                        log(f"{indent}Pre-build:   {clean_pre}")
-                        ota['pre_build'] = clean_pre
-                else:
-                    if is_new:
-                        log(f"{indent}Metadata: not found{(' — ' + meta['error']) if meta.get('error') else ''}")
-            except Exception as me:
-                if is_new:
-                    log(f"{indent}Metadata fetch error: {me}")
-
-            if is_new:
-                log("")  # blank line separator
-                new_findings.append(ota)
-                archived_urls.add(url)
-                save_archived_url(url)
-
-            # Queue all post-build fingerprints we haven't tried yet
-            for fp in extra_fingerprints:
-                if fp not in visited_fingerprints:
-                    queue.append(fp)
-                # Save newly seen fingerprints for future runs
-                if fp not in archived_fps:
-                    archived_fps.add(fp)
-                    save_archived_fingerprint(fp)
-
-        except Exception as e:
-            log(f"{indent}[ERROR] {e}")
-
-        time.sleep(REQUEST_DELAY_SEC)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  Main XR run
-# ─────────────────────────────────────────────────────────────────────────────
-
-def run_xr():
+def run_sorrel():
     log("=" * 60)
-    log("Android XR OTA checker started.")
+    log("Sorrel OTA checker started.")
 
-    # Load fingerprint+serials from numbered files
-    file_groups = load_numbered_files()
-
-    if not file_groups:
-        log("[ERROR] No numbered files (1.txt, 2.txt, ...) found. Aborting.")
+    # Load serial numbers
+    if not os.path.exists(SERIALS_FILE):
+        log(f"[ERROR] {SERIALS_FILE} not found. Aborting.")
         sys.exit(1)
+
+    with open(SERIALS_FILE, "r", encoding="utf-8") as f:
+        serials = [line.strip() for line in f if line.strip()]
+
+    log(f"Loaded {len(serials)} serial number(s) from {SERIALS_FILE}.")
 
     archived_urls = load_archived_urls()
     log(f"Loaded {len(archived_urls)} archived URL(s) from {ARCHIVED_FILE}.")
 
-    archived_fps = load_archived_fingerprints()
-    log(f"Loaded {len(archived_fps)} archived fingerprint(s) from {ARCHIVED_FP_FILE}.")
-
     new_findings = []
 
-    # Collect all serials across all files for re-checking archived fingerprints
-    all_serials = []
-    for fingerprint, serials, filename in file_groups:
-        log(f"\n--- Processing {filename} | Fingerprint: {fingerprint} ---")
-        total = len(serials)
-        all_serials.extend(serials)
+    for idx, serial in enumerate(serials, 1):
+        log(f"[{idx}/{len(serials)}] Checking serial: {serial}")
 
-        for idx, serial in enumerate(serials, 1):
-            log(f"[{idx}/{total}] Checking serial: {serial}")
-            checkin_with_fingerprint_chain(
-                serial, fingerprint, archived_urls, archived_fps, new_findings
-            )
+        try:
+            settings = perform_checkin(SORREL_FINGERPRINT, device_sn=serial)
+            ota      = find_ota_link(settings)
 
-    # Re-check all previously seen post-build fingerprints with all serials
-    if archived_fps:
-        log(f"\n--- Re-checking {len(archived_fps)} archived fingerprint(s) with all serials ---")
-        unique_serials = list(dict.fromkeys(all_serials))  # preserve order, deduplicate
-        for fp in sorted(archived_fps):
-            for serial in unique_serials:
-                log(f"  Re-check | serial={serial} | fp={fp}")
-                checkin_with_fingerprint_chain(
-                    serial, fp, archived_urls, archived_fps, new_findings
-                )
+            if ota and ota["url"]:
+                url = ota["url"]
+                if url not in archived_urls:
+                    log(f"  *** NEW URL FOUND ***")
+                    finding_text = format_finding(ota)
+                    for line in finding_text.splitlines():
+                        log(f"  {line}")
 
-    log(f"\nRun complete. {len(new_findings)} new finding(s) this run.")
+                    # Fetch metadata from the OTA ZIP
+                    try:
+                        log(f"  Fetching OTA metadata...")
+                        meta = fetch_ota_metadata(url)
+                        if meta['found'] and meta['fields']:
+                            fields = meta['fields']
+                            post_build = fields.get('post-build', '')
+                            if post_build:
+                                log(f"  Fingerprint: {post_build}")
+                                ota['post_build'] = post_build
+                            pre_build = fields.get('pre-build', '')
+                            if pre_build:
+                                log(f"  Pre-build:   {pre_build}")
+                                ota['pre_build'] = pre_build
+                        else:
+                            log(f"  Metadata: not found{(' — ' + meta['error']) if meta.get('error') else ''}")
+                    except Exception as me:
+                        log(f"  Metadata fetch error: {me}")
+
+                    log("")  # blank line separator
+
+                    new_findings.append(ota)
+                    archived_urls.add(url)
+                    save_archived_url(url)
+                else:
+                    log(f"  URL already archived, skipping.")
+            else:
+                log(f"  No OTA update found.")
+
+        except Exception as e:
+            log(f"  [ERROR] {e}")
+
+        if idx < len(serials):
+            time.sleep(REQUEST_DELAY_SEC)
+
+    log(f"Run complete. {len(new_findings)} new finding(s) this run.")
     log("=" * 60)
 
     if new_findings:
@@ -792,21 +661,19 @@ def run_xr():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Android XR OTA Prober")
+    parser = argparse.ArgumentParser(description="OTA Prober")
     parser.add_argument(
-        "--xr",
+        "--sorrel",
         action="store_true",
-        help="Run Android XR OTA checker using fingerprint+serials from 1.txt, 2.txt, ...",
+        help="Run sorrel OTA checker using serials from serials.txt",
     )
-    # Keep --sorrel as a hidden alias for backwards compatibility
-    parser.add_argument("--sorrel", action="store_true", help=argparse.SUPPRESS)
     args, _ = parser.parse_known_args()
 
-    if args.xr or args.sorrel:
-        run_xr()
+    if args.sorrel:
+        run_sorrel()
     else:
-        print("No mode specified. Use --xr to run the Android XR OTA checker.")
-        print("Example: python sorrel_checker.py --xr")
+        print("No mode specified. Use --sorrel to run the sorrel OTA checker.")
+        print("Example: python sorrel_checker.py --sorrel")
         sys.exit(0)
 
 
