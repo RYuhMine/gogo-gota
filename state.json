@@ -1,0 +1,34 @@
+{
+ "sha256": "beead7a9337ae283986746bc1b7ed3a647ad4687befe7d396e0bc41ec0d5e4a6",
+ "version": 7810,
+ "updated": "2026-11-02T08:43:19Z",
+ "record": {
+  "version": 7810,
+  "sha256": "beead7a9337ae283986746bc1b7ed3a647ad4687befe7d396e0bc41ec0d5e4a6",
+  "detected": "2026-11-02T08:43:19Z",
+  "info": {
+   "update_merkle": "faf94c738dd103e10bdf95b203ccf1aa6f7c6307c2280048d0c8ac8502c1b8ef",
+   "build_info_merkle": "8663ff91162b4d13a821da31da710b50cdab9efe7d0279d8a2458516e64d6991",
+   "errors": [],
+   "product_version": "ZP1A.261007.002/16538212",
+   "update_version": "ZP1A.261007.002/16538212",
+   "product": "sorrel-userdebug",
+   "board": "sorrel",
+   "platform_version": "33.20261005.4.1",
+   "commit_date": "2026-10-07T08:11:57-07:00",
+   "build_id": "ZP1A.261007.002",
+   "incremental": "16538212",
+   "complete": true
+  },
+  "prev_version": null,
+  "prev_build": null,
+  "diff": null,
+  "kind": "first"
+ },
+ "notified": {
+  "1": true,
+  "2": true
+ },
+ "fail_count": 0,
+ "fail_alerted": false
+}
