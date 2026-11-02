@@ -1,0 +1,48 @@
+name: Fuchsia targets watcher
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'     # every 5 minutes (GitHub's minimum; runs may be delayed)
+  workflow_dispatch:           # manual run: Actions tab -> Run workflow
+
+permissions:
+  contents: write              # needed to commit state.json / last_targets.json
+
+concurrency:
+  group: targets-watcher       # never run two checks at once
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run watcher
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          DISCORD_WEBHOOK_2: ${{ secrets.DISCORD_WEBHOOK_2 }}
+          # Optional settings (uncomment to change):
+          # NOTIFY_ONLY_BUILD_CHANGE: '1'   # post only when the build ID changes, not on every targets change
+          # NOTIFY_ON_FIRST_RUN: '0'        # no "watcher started" message on the very first run
+          # SAVE_TARGETS_HISTORY: '1'       # keep every targets.json in targets_history/ (grows the repo)
+        run: python targets_watcher.py
+
+      - name: Save state
+        run: |
+          git config user.name "targets-watcher"
+          git config user.email "targets-watcher@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No state changes."
+          else
+            git commit -m "Update watcher state"
+            git push || (git pull --rebase && git push)
+          fi
